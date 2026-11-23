@@ -93,6 +93,33 @@ def render(pdf, n_pages, kind, dest):
         raise RuntimeError(f"{kind}: expected {n_pages} pages, rendered {count}")
 
 
+def ink_ratio(pdf, page):
+    """Share of non-white pixels on a page, from a small greyscale render."""
+    raw = subprocess.run(
+        ["pdftoppm", "-gray", "-scale-to", "160", "-f", str(page), "-l", str(page), str(pdf)],
+        capture_output=True, check=True,
+    ).stdout
+    # Binary PGM: "P5\n<w> <h>\n<max>\n<pixels>"
+    m = re.match(rb"P5\s+(\d+)\s+(\d+)\s+\d+\s", raw)
+    w, h = int(m.group(1)), int(m.group(2))
+    pixels = raw[m.end():m.end() + w * h]
+    return sum(1 for v in pixels if v < 235) / (w * h)
+
+
+def hidden_pages(pdf, n, meta):
+    """Pages (1-based) not to show: blank pages at the very start and end, plus any listed in meta."""
+    hide = set(int(x) for x in meta.get("hide_pages", []))
+    if meta.get("trim_blank", True) and n > 4:
+        blank = lambda pg: ink_ratio(pdf, pg) < 0.001
+        pg = 2                                  # page 1 is the cover
+        while pg < n // 2 and blank(pg):
+            hide.add(pg); pg += 1
+        pg = n if blank(n) else n - 1           # last page may be the back cover
+        while pg > n // 2 and blank(pg):
+            hide.add(pg); pg -= 1
+    return sorted(p for p in hide if 1 <= p <= n)
+
+
 def download_copy(pdf, target, mode):
     """mode: 'compressed' (default), 'original', or False for no download."""
     if mode is False or mode == "none":
@@ -126,6 +153,9 @@ def build_issue(folder, base_url):
     n = len(sizes)
     out = OUT / slug
     out.mkdir(parents=True, exist_ok=True)
+    hide = hidden_pages(pdf, n, meta)
+    if hide:
+        log(f"   hiding blank/unwanted pages: {', '.join(map(str, hide))}")
     for kind in ("p", "t", "hd"):
         log(f"   rendering {n} pages → {kind}/")
         render(pdf, n, kind, out / kind)
@@ -138,7 +168,8 @@ def build_issue(folder, base_url):
         "coverAlone": meta.get("cover_alone", True),
         "theme": meta.get("theme", "dark"),
         "download": dl,
-        "pages": [{"w": w, "h": h} for w, h in sizes],
+        "pages": [dict(w=w, h=h, **({"hidden": True} if i + 1 in hide else {}))
+                  for i, (w, h) in enumerate(sizes)],
     }
     (out / "manifest.json").write_text(json.dumps(manifest, separators=(",", ":")))
     html = (TEMPLATES / "viewer.html").read_text().replace("{{TITLE}}", title)
@@ -147,7 +178,7 @@ def build_issue(folder, base_url):
     url = f"{base_url.rstrip('/')}/{slug}/" if base_url else f"{slug}/"
     total = sum(f.stat().st_size for f in out.rglob("*") if f.is_file())
     log(f"   done: {url}  ({total / 1e6:.1f} MB published)")
-    return {"slug": slug, "title": title, "pages": n, "url": url,
+    return {"slug": slug, "title": title, "pages": n - len(hide), "url": url,
             "order": meta.get("order", 0), "subtitle": meta.get("subtitle", "")}
 
 
