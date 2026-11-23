@@ -83,6 +83,7 @@ footer input{flex:1;accent-color:var(--fg);height:20px;margin:0}
   const embedded = window.self !== window.top;
 
   let M, N, pages, views = [], spreadMode = null, vi = 0;  // vi = current view index
+  let vis = [], num = new Map();  // pages shown (PDF indices), and their displayed page numbers
   let box = { w: 0, h: 0, ox: 0, oy: 0 };                     // fitted size + offset of current view
   let z = { s: 1, x: 0, y: 0 };                               // zoom/pan transform
   let hdLoaded = false;
@@ -91,7 +92,7 @@ footer input{flex:1;accent-color:var(--fg);height:20px;margin:0}
   const wide = i => pages[i].w > pages[i].h * 1.05;
   function buildViews(two) {
     const out = [];
-    if (!two) { for (let i = 0; i < N; i++) out.push([i]); return out; }
+    if (!two) return vis.map(i => [i]);
     // The first single (portrait) page is a right-hand page in print, so it stands alone;
     // after that, single pages pair up. Wide pages (cover wraps, spreads) always stand alone.
     let i = 0, firstSingle = M.coverAlone !== false;
@@ -101,7 +102,8 @@ footer input{flex:1;accent-color:var(--fg);height:20px;margin:0}
       if (i + 1 < N && !wide(i + 1)) { out.push([i, i + 1]); i += 2; }
       else { out.push([i]); i += 1; }
     }
-    return out;
+    // Pair using the original print order, then drop hidden (blank) pages so spreads stay true.
+    return out.map(v => v.filter(i => !pages[i].hidden)).filter(v => v.length);
   }
   const viewOf = page => Math.max(0, views.findIndex(v => v.includes(page)));
 
@@ -171,7 +173,7 @@ footer input{flex:1;accent-color:var(--fg);height:20px;margin:0}
     spread.classList.toggle("two", v.length === 2);
     v.forEach(p => {
       const img = new Image();
-      img.alt = `Page ${p + 1}`;
+      img.alt = `Page ${num.get(p)}`;
       img.decoding = "async";
       img.src = src("p", p);
       spread.appendChild(img);
@@ -183,12 +185,12 @@ footer input{flex:1;accent-color:var(--fg);height:20px;margin:0}
       spread.animate([{ opacity: 0, transform: `translateX(${dir * 28}px)` }, { opacity: 1, transform: "none" }],
         { duration: 220, easing: "cubic-bezier(.2,.7,.2,1)" });
     }
-    const label = v.length === 2 ? `${v[0] + 1}–${v[1] + 1}` : `${v[0] + 1}`;
-    $("count").textContent = `${label} / ${N}`;
-    $("scrub").value = v[0] + 1;
+    const label = v.length === 2 ? `${num.get(v[0])}–${num.get(v[1])}` : `${num.get(v[0])}`;
+    $("count").textContent = `${label} / ${vis.length}`;
+    $("scrub").value = num.get(v[0]);
     $("bPrev").disabled = vi === 0;
     $("bNext").disabled = vi === views.length - 1;
-    try { history.replaceState(null, "", "#" + (v[0] + 1)); } catch (e) {}
+    try { history.replaceState(null, "", "#" + num.get(v[0])); } catch (e) {}
     preload();
   }
   function preload() {
@@ -205,7 +207,7 @@ footer input{flex:1;accent-color:var(--fg);height:20px;margin:0}
   const goPage = p => go(viewOf(p), 0);
   function startPage() {
     const n = parseInt(location.hash.slice(1), 10) || parseInt(params.get("page"), 10) || 1;
-    return Math.min(Math.max(n, 1), N) - 1;
+    return vis[Math.min(Math.max(n, 1), vis.length) - 1];
   }
 
   /* ---------- pointer input: tap zones, swipe, double-tap zoom, pinch, pan ---------- */
@@ -319,7 +321,7 @@ footer input{flex:1;accent-color:var(--fg);height:20px;margin:0}
   $("bPrev").onclick = prev;
   $("bNext").onclick = next;
   $("bZoom").onclick = () => (z.s > 1.01 ? resetZ() : zoomTo(2.5));
-  $("scrub").addEventListener("input", e => goPage(+e.target.value - 1));
+  $("scrub").addEventListener("input", e => goPage(vis[+e.target.value - 1]));
 
   const fsEl = document.documentElement;
   const canFull = !!(document.fullscreenEnabled || document.webkitFullscreenEnabled);
@@ -333,17 +335,17 @@ footer input{flex:1;accent-color:var(--fg);height:20px;margin:0}
   function openGrid() {
     const wrap = $("gridItems");
     if (!wrap.childElementCount) {
-      pages.forEach((pg, i) => {
-        const b = document.createElement("button");
-        b.innerHTML = `<img loading="lazy" alt="" src="${src("t", i)}" style="--ar:${pg.w}/${pg.h}">${i + 1}`;
+      vis.forEach((i, k) => {
+        const pg = pages[i], b = document.createElement("button");
+        b.innerHTML = `<img loading="lazy" alt="" src="${src("t", i)}" style="--ar:${pg.w}/${pg.h}">${k + 1}`;
         b.onclick = () => { closeGrid(); goPage(i); };
         wrap.appendChild(b);
       });
     }
     const cur = views[vi];
-    [...wrap.children].forEach((b, i) => b.classList.toggle("current", cur.includes(i)));
+    [...wrap.children].forEach((b, k) => b.classList.toggle("current", cur.includes(vis[k])));
     $("grid").classList.add("open");
-    wrap.children[cur[0]].scrollIntoView({ block: "center" });
+    wrap.children[num.get(cur[0]) - 1].scrollIntoView({ block: "center" });
   }
   function closeGrid() { $("grid").classList.remove("open"); stage.focus({ preventScroll: true }); }
   $("bGrid").onclick = openGrid;
@@ -355,9 +357,12 @@ footer input{flex:1;accent-color:var(--fg);height:20px;margin:0}
 
   fetch("manifest.json").then(r => { if (!r.ok) throw new Error(r.status); return r.json(); }).then(m => {
     M = m; pages = m.pages; N = pages.length;
+    vis = pages.map((p, i) => i).filter(i => !pages[i].hidden);
+    if (!vis.length) { pages.forEach(p => delete p.hidden); vis = pages.map((p, i) => i); }
+    vis.forEach((i, k) => num.set(i, k + 1));
     document.documentElement.dataset.theme = params.get("theme") || m.theme || "dark";
     if (m.title) { document.title = m.title; $("title").textContent = m.title; }
-    $("scrub").max = N;
+    $("scrub").max = vis.length;
     if (m.download) { $("bDownload").href = m.download; $("bDownload").hidden = false; }
     if (canFull) $("bFull").hidden = false;
     else if (embedded) { $("bOpen").href = location.href.split("#")[0]; $("bOpen").hidden = false; }
